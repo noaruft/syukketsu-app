@@ -7,12 +7,17 @@ const WEEK = [[2, "月曜"], [3, "火曜"], [4, "水曜"], [5, "木曜"], [6, "�
 const PERIODS = [1, 2, 3, 4, 5, 6, 7];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
-const SAMPLE = [["文学国語", 38, 2], ["古典B", 71, 4], ["世界史探究", 53, 5], ["政治・経済", 37, 4], ["数学演習", 54, 4],
+const SAMPLE = [["文学国語", 38, 2], ["古典B", 71, 4, 1], ["世界史探究", 53, 5], ["政治・経済", 37, 4], ["数学演習", 54, 4],
   ["理科基礎演習", 58, 4], ["体育", 33, 2], ["英語コミュニケーションIII", 54, 6], ["論理・表現III", 37, 1], ["LHR", 98, 17]];
 // 令和8年度の時間割（A週・B週は理科基礎演習に換算すると同じ）。曜日(1=日…7=土) → {時限: SAMPLE の番号}
 const SAMPLE_TT = { 2: { 1: 2, 2: 4, 3: 0, 4: 7, 6: 1 }, 3: { 1: 1, 2: 5, 3: 7, 4: 8, 5: 3, 7: 2 }, 4: { 1: 3, 3: 5, 4: 7 },
   5: { 2: 1, 3: 0, 4: 8, 5: 5, 6: 4 }, 6: { 2: 2, 3: 4, 4: 1, 5: 6, 6: 6, 7: 9 } };
 
+// 学期の日程：学校の資料の数字は 11/16 までの分。授業は 12/25 まで（土日祝は休み）
+const BASE_DAY = "2026-11-17";
+const LAST_DAY = "2026-12-25";
+const DEFAULT_OFF = { "2026-11-23": "休校・祝日", "2026-12-10": "テスト日", "2026-12-11": "テスト日" };
+const COUNTED = new Set(["present", "late", "early", "lateEarly", "absent", "excluded"]);
 const newSubject = () => ({ id: uid(), name: "", total: 0, absent: 0, late: 0, early: 0, lateEarly: 0, excluded: 0, den: null });
 
 function load() {
@@ -21,16 +26,17 @@ function load() {
 }
 let S = load();
 S.off = S.off || {};
+if (!S.v2) { S.off = { ...DEFAULT_OFF, ...S.off }; S.baseDay = S.baseDay || BASE_DAY; S.lastDay = S.lastDay || LAST_DAY; S.v2 = true; }
 let tab = "subjects";
 let date = todayStr();
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
 
 function loadSample() {
-  S.subjects = SAMPLE.map(([name, total, absent]) => ({ ...newSubject(), name, total, absent }));
+  S.subjects = SAMPLE.map(([name, total, absent, late = 0]) => ({ ...newSubject(), name, total, absent, late }));
   S.slots = [];
   for (const [wd, ps] of Object.entries(SAMPLE_TT))
     for (const [p, i] of Object.entries(ps)) S.slots.push({ wd: +wd, period: +p, sid: S.subjects[i].id });
-  S.records = []; S.off = {};
+  S.records = []; S.off = { ...DEFAULT_OFF }; S.baseDay = BASE_DAY; S.lastDay = LAST_DAY; S.v2 = true;
   save();
 }
 
@@ -39,6 +45,7 @@ function effective(s) {
   const e = { ...s };
   for (const r of S.records) {
     if (r.sid !== s.id) continue;
+    if (COUNTED.has(r.status)) e.total++;
     if (r.status === "late") e.late++;
     else if (r.status === "early") e.early++;
     else if (r.status === "lateEarly") e.lateEarly++;
@@ -47,17 +54,38 @@ function effective(s) {
   }
   return e;
 }
+function addDay(str) { const [y, m, d] = str.split("-").map(Number); const x = new Date(y, m - 1, d + 1); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; }
+// 時間割どおりのコマのうち、まだ記録していないもの。
+// 昨日までの分は「出席した」とみなして実施済みに足し（past）、今日以降は「これからの授業」（future）とする
+function unrecorded(s) {
+  let past = 0, future = 0;
+  const today = todayStr();
+  for (let d = S.baseDay || BASE_DAY; d <= (S.lastDay || LAST_DAY); d = addDay(d)) {
+    if (S.off[d] !== undefined) continue;
+    for (const sl of S.slots) {
+      if (sl.sid !== s.id || sl.wd !== weekdayOf(d)) continue;
+      const st = statusOf(d, sl.period);
+      if (st === "none" || COUNTED.has(st)) continue; // 休講は数えない・記録済みは effective で数える
+      if (d < today) past++; else future++;
+    }
+  }
+  return { past, future };
+}
 function calc(s) {
   const e = effective(s);
+  const u = unrecorded(s);
+  e.total += u.past; // 過ぎた授業日は出席として自動で数える
   const converted = Math.floor((e.late + e.early + e.lateEarly) / 3);
   const missed = e.absent + converted;
   const required = Math.max(0, e.total - e.excluded);
   const rate = required > 0 ? missed / required : 0;
+  const future = u.future;
+  const yearRequired = required + future; // 学期末までに出席すべき時数の見込み
   const n = Math.max(1, s.den || S.den);
-  const max = Math.floor(required / n);
+  const max = Math.floor(yearRequired / n);
   const remaining = max - missed;
   const danger = remaining < 0 ? "over" : remaining <= 1 ? "critical" : remaining <= 3 ? "caution" : "safe";
-  return { converted, missed, required, rate, max, remaining, danger };
+  return { converted, missed, required, rate, autoPresent: u.past, future, yearRequired, max, remaining, danger };
 }
 const DANGER = { safe: "余裕", caution: "注意", critical: "あと少し", over: "超過" };
 const pct = r => Math.ceil(r * 100 - 1e-9) + "%";
@@ -87,7 +115,7 @@ function render() {
 function vSubjects() {
   let h = `<div class="toolbar"><span></span><button class="icon-btn" data-act="add" aria-label="教科を追加">＋</button></div><h1>あと何回休める？</h1>`;
   if (!S.subjects.length)
-    return h + `<div class="empty">教科がありません<br>右上の＋から追加するか、サンプルで試せます。<br><button class="btn" data-act="sample">サンプルを読み込む</button></div>`;
+    return h + `<div class="empty">教科がありません<br>右上の＋から追加するか、学校の資料の初期データを入れられます。<br><button class="btn" data-act="sample">初期データを入れる</button></div>`;
   const ranked = S.subjects.map(s => [s, calc(s)]).sort((a, b) => a[1].remaining - b[1].remaining);
   const [ws, wc] = ranked[0];
   const over = ranked.filter(x => x[1].danger === "over").length;
@@ -144,6 +172,8 @@ function vTimetable() {
 function vSettings() {
   return `<h1>設定</h1><h2>欠席の上限</h2><div class="card"><div class="row"><span class="grow">全体の上限</span>
     <select data-act="den">${[2, 3, 4, 5, 6].map(n => `<option value="${n}"${n === S.den ? " selected" : ""}>${fraction(n)}</option>`).join("")}</select></div></div>
+    <h2>授業の期間</h2><div class="card"><div class="row"><span class="grow">最後の授業日</span><input type="date" id="lastday" value="${S.lastDay}"></div></div>
+    <p class="note">「あと何回休める」は、最後の授業日までの時間割のコマ（土日・授業なしの日・休講を除く）も含めた時数で計算します。祝日やテストの日は、記録タブの「この日は授業なし」で登録してください。</p>
     <p class="note">欠課合計が「出席すべき時数」のこの割合を超えると単位不認定になる、という一般的な高校のルールです（既定は3分の1）。教科ごとに別の値も選べます。学校の規則を確認して合わせてください。</p>
     <h2>色の目安（あと何回休めるか）</h2><div class="card">
     <div class="row"><span class="safe">●</span><span class="grow">余裕</span><span class="sub">4回以上</span></div>
@@ -151,7 +181,7 @@ function vSettings() {
     <div class="row"><span class="critical">●</span><span class="grow">あと少し</span><span class="sub">0〜1回</span></div>
     <div class="row"><span class="over">●</span><span class="grow">超過</span><span class="sub">上限を超えた</span></div></div>
     <h2>データ</h2><div class="card"><div class="btns">
-    <button class="btn" data-act="sample">サンプル（出欠表の例・時間割つき）を読み込む</button>
+    <button class="btn" data-act="sample">初期データ（学校の出欠表・時間割）に戻す</button>
     <button class="btn" data-act="export">バックアップを書き出す</button>
     <button class="btn" data-act="import">バックアップを読み込む</button>
     <button class="btn plain" data-act="reset">すべてのデータを消す</button></div></div>
@@ -172,11 +202,11 @@ function renderSheet() {
   const recCount = S.records.filter(r => r.sid === draft.id).length;
   const ok = draft.name.trim().length > 0;
   keep.innerHTML = `<div><div class="sheet-head"><button data-act="cancel">キャンセル</button><b>${draftIsNew ? "教科を追加" : "教科を編集"}</b><button data-act="save"${ok ? "" : " disabled"}>保存</button></div>
-  <h2>教科</h2><div class="card"><div class="row"><input type="text" id="name" placeholder="教科名（例：古典B）" value="${esc(draft.name)}"></div>${stepper("total", "総授業時数")}</div>
+  <h2>教科</h2><div class="card"><div class="row"><input type="text" id="name" placeholder="教科名（例：古典B）" value="${esc(draft.name)}"></div>${stepper("total", "総授業時数（これまでの分）")}</div>
   <h2>これまでの累計</h2><div class="card">${stepper("absent", "欠席")}${stepper("late", "遅刻")}${stepper("early", "早退")}${stepper("lateEarly", "遅早")}${stepper("excluded", "忌引・出停・留学（除く時数）")}</div>
-  <p class="note">記録タブで付けた毎回の出欠は、ここに自動で足されます。アプリを使い始める前の分だけを入れてください。</p>
+  <p class="note">学校の資料（11/16 までの分）です。これ以降は、過ぎた授業日の時間割のコマが自動で「出席」として足され、記録タブで付けた欠席・遅刻などはその分だけ反映されます。</p>
   <h2>計算結果</h2><div class="card">
-  ${[["日々の記録の件数", recCount], ["換算欠席（遅刻・早退・遅早 3回＝1回）", c.converted], ["欠課合計", c.missed], ["出席すべき時数", c.required], ["欠席率", pct(c.rate)], ["休める上限", c.max + " 回"]].map(([k, v]) => `<div class="row"><span class="grow">${k}</span><span class="sub" style="font-size:15px">${v}</span></div>`).join("")}
+  ${[["日々の記録の件数", recCount], ["記録なしで出席とみなしたコマ", c.autoPresent], ["換算欠席（遅刻・早退・遅早 3回＝1回）", c.converted], ["欠課合計", c.missed], ["出席すべき時数（今日まで）", c.required], ["欠席率", pct(c.rate)], ["これからの授業（見込み）", c.future + " コマ"], ["学期末までの出席すべき時数", c.yearRequired], ["休める上限", c.max + " 回"]].map(([k, v]) => `<div class="row"><span class="grow">${k}</span><span class="sub" style="font-size:15px">${v}</span></div>`).join("")}
   <div class="row"><span class="grow">あと何回休める？</span><b class="${c.danger}">${remainText(c)}</b></div></div>
   <h2>この教科の上限</h2><div class="card"><div class="row"><span class="grow">上限</span><select data-act="dsel"><option value="">全体設定（${fraction(S.den)}）</option>${[2, 3, 4, 5, 6].map(n => `<option value="${n}"${draft.den === n ? " selected" : ""}>${fraction(n)}</option>`).join("")}</select></div></div>
   ${draftIsNew ? "" : `<div class="card" style="margin-top:22px"><div class="btns"><button class="btn plain" data-act="del">この教科を削除</button></div></div>`}</div>`;
@@ -191,7 +221,7 @@ document.addEventListener("click", e => {
   const a = t.dataset.act;
   if (a === "add") openSheet(newSubject(), true);
   else if (a === "edit") openSheet(S.subjects.find(s => s.id === t.dataset.id), false);
-  else if (a === "sample") { if (!S.subjects.length || confirm("今の教科・時間割・記録をサンプルで置き換えますか？")) { loadSample(); render(); } }
+  else if (a === "sample") { if (!S.subjects.length || confirm("今の教科・時間割・記録を消して、初期データ（学校の資料）に戻しますか？")) { loadSample(); render(); } }
   else if (a === "off") { S.off[date] = $("#offreason").value; S.records = S.records.filter(r => r.day !== date); save(); render(); }
   else if (a === "offclear") { delete S.off[date]; save(); render(); }
   else if (a === "day") { for (const sl of slotsOn(date)) setStatus(date, sl.period, sl.sid, t.dataset.st); save(); render(); }
@@ -222,6 +252,7 @@ document.addEventListener("click", e => {
 
 document.addEventListener("change", e => {
   const t = e.target, a = t.dataset.act;
+  if (t.id === "lastday") { if (t.value) { S.lastDay = t.value; save(); } return; }
   if (t.id === "date") { if (t.value) { date = t.value; render(); } return; }
   if (a === "slot") { setStatus(date, +t.dataset.p, t.dataset.sid, t.value); save(); render(); }
   else if (a === "tt") {
@@ -235,5 +266,7 @@ document.addEventListener("input", e => {
   if (e.target.id === "name" && draft) { draft.name = e.target.value; const b = document.querySelector('[data-act="save"]'); if (b) b.disabled = !draft.name.trim(); }
 });
 
+// 初めて開いたときは、学校の資料（出欠表・時間割）を最初から入れておく
+if (!S.subjects.length && !S.slots.length && !S.records.length) loadSample();
 render();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
