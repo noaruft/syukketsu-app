@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>あと何回休める？</title>
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="あと何回休める">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="view"></main>
+<nav id="tabs">
+  <button data-tab="subjects"><span>☰</span>教科</button>
+  <button data-tab="record"><span>✓</span>記録</button>
+  <button data-tab="timetable"><span>▦</span>時間割</button>
+  <button data-tab="settings"><span>⚙</span>設定</button>
+</nav>
+<div id="sheet" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
